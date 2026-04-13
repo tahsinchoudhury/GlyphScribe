@@ -4,105 +4,145 @@ import string
 import numpy as np
 import math
 import os
+import re
 from .augmentation import data_transformer
-from bidi.algorithm import get_display
-
-# Adding Bangla characters
-bangla_characters = ''.join([chr(i) for i in range(0x0980, 0x09FF + 1)])
-
-# Combine with other character sets as needed
-all_characters = string.punctuation + " " + bangla_characters
+from .indic_config import (
+    INDIC_SCRIPTS, RTL_SCRIPTS,
+    get_characters_for_script, get_available_scripts, get_script_direction
+)
 
 
 class GlyphScribe:
     """
     GlyphScribe: A class for generating distorted text images with various effects.
+    Supports all major Indic scripts.
     """
 
-    def __init__(self, base_fonts_dir='bangla_fonts', background_base_dir='background'):
+    def __init__(self, base_fonts_dir='fonts', background_base_dir='background', script='bangla'):
         """
-        Initialize the GlyphScribe.
+        Initialize GlyphScribe.
 
         Args:
-            base_fonts_dir (str): Base directory for fonts
+            base_fonts_dir (str): Base directory for fonts.
+                Structure: fonts/{script}/hw/ and fonts/{script}/printed/
+                OR legacy: bangla_fonts/hw/ (auto-detected)
             background_base_dir (str): Base directory for background images
+            script (str): Target script. Options:
+                'bangla', 'devanagari', 'tamil', 'telugu', 'kannada',
+                'malayalam', 'gujarati', 'odia', 'gurmukhi', 'sinhala', 'all_indic'
         """
         self.base_fonts_dir = base_fonts_dir
         self.background_base_dir = background_base_dir
-        self.all_characters = string.punctuation + " " + bangla_characters
+        self.script = script
+        self.direction = get_script_direction(script)
+        self.all_characters = string.punctuation + " " + get_characters_for_script(script)
+
+        # Validate font directory exists
+        self._validate_font_dir()
+
+    def _validate_font_dir(self):
+        """Check if font directory structure is valid."""
+        if not os.path.exists(self.base_fonts_dir):
+            # Try legacy bangla_fonts path
+            if os.path.exists("bangla_fonts") and self.script == "bangla":
+                self.base_fonts_dir = "bangla_fonts"
+                print(f"⚠️ Using legacy font path: bangla_fonts/")
+                return
+            raise FileNotFoundError(
+                f"Font directory not found: {self.base_fonts_dir}\n"
+                f"Expected structure:\n"
+                f"  {self.base_fonts_dir}/{self.script}/hw/*.ttf\n"
+                f"  {self.base_fonts_dir}/{self.script}/printed/*.ttf"
+            )
+
+    @staticmethod
+    def supported_scripts():
+        """Return list of all supported scripts."""
+        return get_available_scripts()
 
     @staticmethod
     def calculate_skew_offset(x, x_pivot, angle):
-        """
-        Calculate the vertical offset for skewing text.
-
-        Args:
-            x: current x-coordinate.
-            x_pivot: x-coodinate of the pivot based on which the text has to be skewed.
-            angle: angle of the skew (in degrees).
-        """
+        """Calculate vertical offset for skewing text."""
         angle = np.radians(angle)
         delta_y = (x_pivot - x) * np.tan(angle)
         return delta_y
 
     @staticmethod
     def calculate_bent_offset(x, amplitude, frequency):
-        """
-        Calculate the vertical offset for a bent effect using a sine wave.
-
-        Args:
-            x: current x-coordinate.
-            amplitude: amplitude of the sine wave.
-            frequency: frequency of the sine wave.
-        """
+        """Calculate vertical offset for bent effect using sine wave."""
         return int(amplitude * np.sin(frequency * x))
 
     @staticmethod
     def extract_words(sentence):
-        """
-        Extracts and returns a list of words from a Bangla sentence, retaining spaces between words.
-
-        Args:
-            sentence (str): The input Bangla sentence.
-
-        Returns:
-            list: A list of words in the sentence, including spaces.
-        """
-        import re
+        """Extract words from a sentence, works for any script."""
         words = re.findall(r'\S+\s*', sentence)
         return words
 
+    def _get_font_dir(self, font_type="hw"):
+        """
+        Resolve font directory path with fallback logic.
+
+        Tries in order:
+            1. fonts/{script}/{font_type}/
+            2. fonts/{font_type}/
+            3. bangla_fonts/{font_type}/  (legacy)
+        """
+        # Try script-specific path
+        path = os.path.join(self.base_fonts_dir, self.script, font_type)
+        if os.path.exists(path):
+            return path
+
+        # Legacy fallback (existing bangla_fonts/hw/ and bangla_fonts/printed/)
+        if self.script in ("bangla", "assamese"):
+            path = os.path.join(self.base_fonts_dir, font_type)
+            if os.path.exists(path) and os.listdir(path):
+                return path
+
+        raise FileNotFoundError(
+            f"No font directory found for script='{self.script}', type='{font_type}'\n"
+            f"Tried:\n"
+            f"  {self.base_fonts_dir}/{self.script}/{font_type}/\n"
+            f"  {self.base_fonts_dir}/{font_type}/\n"
+            f"  bangla_fonts/{font_type}/"
+        )
+
     def get_random_font_path(self, font_type="hw"):
-        """
-        Get a random font path from the fonts directory.
+        """Get a random font path from the fonts directory."""
+        font_dir = self._get_font_dir(font_type)
+        fonts = [f for f in os.listdir(font_dir) if f.endswith(('.ttf', '.otf', '.TTF', '.OTF'))]
 
-        Args:
-            font_type (str): Type of font ('hw' or 'printed')
+        if not fonts:
+            raise FileNotFoundError(f"No font files found in {font_dir}")
 
-        Returns:
-            str: Path to a random font file
-        """
-        font_name = np.random.choice(os.listdir(f"{self.base_fonts_dir}/{font_type}/"))
-        return os.path.join(self.base_fonts_dir, font_type, font_name)
+        font_name = np.random.choice(fonts)
+        return os.path.join(font_dir, font_name)
+
+    def get_all_font_paths(self, font_type="hw"):
+        """Get all font paths for current script."""
+        font_dir = self._get_font_dir(font_type)
+        fonts = [
+            os.path.join(font_dir, f)
+            for f in os.listdir(font_dir)
+            if f.endswith(('.ttf', '.otf', '.TTF', '.OTF'))
+        ]
+        return fonts
 
     def get_random_background_path(self):
-        """
-        Get a random background image path.
+        """Get a random background image path."""
+        valid_ext = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
+        backgrounds = [
+            f for f in os.listdir(self.background_base_dir)
+            if f.lower().endswith(valid_ext) and not f.startswith('.')
+        ]
 
-        Returns:
-            str: Path to a random background image
-        """
-        background_image_name = np.random.choice(os.listdir(f"{self.background_base_dir}/"))
-        return os.path.join(self.background_base_dir, background_image_name)
+        if not backgrounds:
+            raise FileNotFoundError(f"No background images in {self.background_base_dir}")
+
+        bg_name = np.random.choice(backgrounds)
+        return os.path.join(self.background_base_dir, bg_name)
 
     def add_bars(self, draw, image_size):
-        """
-        Add random vertical and horizontal bars to the image.
-
-        Args:
-            draw: ImageDraw object
-            image_size: Tuple of (width, height)
-        """
+        """Add random vertical and horizontal bars to the image."""
         for _ in range(random.randint(3, 6)):
             bar_x = random.randint(0, image_size[0] - 1)
             draw.line([(bar_x, 0), (bar_x, image_size[1])],
@@ -116,19 +156,9 @@ class GlyphScribe:
                      width=random.randint(1, 3))
 
     def add_random_text_overlay(self, draw, text, font, padding, image_size):
-        """
-        Add random text overlay to the image.
-
-        Args:
-            draw: ImageDraw object
-            text: Original text
-            font: Font object
-            padding: Padding tuple
-            image_size: Tuple of (width, height)
-        """
+        """Add random text overlay using script-appropriate characters."""
         random_text = ''.join(random.choice(self.all_characters) for _ in range(len(text)))
         bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
         draw.text(
             (random.randint(-50, 50),
@@ -140,18 +170,7 @@ class GlyphScribe:
         )
 
     def draw_text_with_boxes(self, draw, text, font, padding, tol, character_width, character_height):
-        """
-        Draw text with boxes around each character.
-
-        Args:
-            draw: ImageDraw object
-            text: Text to draw
-            font: Font object
-            padding: Padding tuple
-            tol: Tolerance factor
-            character_width: Average character width
-            character_height: Average character height
-        """
+        """Draw text with boxes around each character."""
         color = tuple([np.random.randint(0, 100)] * 3)
         text_color = tuple([np.random.randint(0, 100)] * 3)
         width = random.randint(1, 3)
@@ -175,15 +194,7 @@ class GlyphScribe:
             )
 
     def draw_text_with_curves(self, draw, words, font, padding):
-        """
-        Draw text with curved effect.
-
-        Args:
-            draw: ImageDraw object
-            words: List of words to draw
-            font: Font object
-            padding: Padding tuple
-        """
+        """Draw text with curved effect."""
         x, y = padding[0], padding[1]
         for word in words:
             offset_y = self.calculate_bent_offset(x=x, amplitude=4, frequency=0.02)
@@ -193,23 +204,12 @@ class GlyphScribe:
                 font=font,
                 fill=tuple([np.random.randint(0, 100)] * 3),
             )
-
-            word_width, _ = draw.textsize(word, font=font)
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
             x += word_width
 
     def draw_text_with_skew(self, draw, words, font, padding, text_width, image_height, angle):
-        """
-        Draw text with skew effect.
-
-        Args:
-            draw: ImageDraw object
-            words: List of words to draw
-            font: Font object
-            padding: Padding tuple
-            text_width: Width of the text
-            image_height: Height of the image
-            angle: Skew angle
-        """
+        """Draw text with skew effect."""
         x, y = padding[0], (image_height // 2)
         x_mid = x + (text_width // 2)
         for word in words:
@@ -220,8 +220,8 @@ class GlyphScribe:
                 font=font,
                 fill=tuple([np.random.randint(0, 100)] * 3),
             )
-
-            word_width, _ = draw.textsize(word, font=font)
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
             x += word_width
 
     def generate(self, text, font_size=48, font_path="", background_path="", angle=0,
@@ -229,25 +229,16 @@ class GlyphScribe:
                 apply_data_augmentation=True, white_background=True, output_path="generated_image.png"):
         """
         Generate a distorted text image with various effects.
-
-        Args:
-            text (str): Text to be generated in the image
-            font_size (int): Font size for the text
-            font_path (str): Path to the font file (empty for random font)
-            background_path (str): Path to the background image file (empty for random background)
-            angle (int): Skew angle in degrees
-            bars (bool): Add bars to the image
-            add_random_text (bool): Add random text overlay
-            add_boxes (bool): Add boxes around characters
-            add_curves (bool): Apply curves to the text
-            apply_data_augmentation (bool): Apply data augmentation
-            white_background (bool): Use white background instead of background image
-            output_path (str): Output path of the generated image
+        Works with any supported Indic script.
         """
         image = Image.new("RGB", (2000, 2000), "white")
         draw = ImageDraw.Draw(image)
 
-        text = get_display(text)
+        # Apply BiDi ONLY for RTL scripts
+        if self.direction == "rtl":
+            from bidi.algorithm import get_display
+            text = get_display(text)
+
         words = self.extract_words(text)
 
         if font_path == "":
@@ -266,19 +257,23 @@ class GlyphScribe:
 
         if add_boxes:
             tol = random.randint(10, 15) / 10
-            character_width, character_height = np.mean([draw.textsize(c, font) for c in text], axis=0).astype(int)
+            char_sizes = []
+            for c in text:
+                cb = draw.textbbox((0, 0), c, font=font)
+                char_sizes.append((cb[2] - cb[0], cb[3] - cb[1]))
+            character_width, character_height = np.mean(char_sizes, axis=0).astype(int)
             image = Image.new("RGB", (int(tol * character_width * len(text)), character_height), "white")
         else:
             w = text_width
             h = text_height
 
-            if angle != 0 or add_curves == True:
+            if angle != 0 or add_curves:
                 w = total_word_width
 
             angle_rad = math.radians(angle)
             new_w = w
             new_h = h
-            if add_curves == False:
+            if not add_curves:
                 new_h = h + int(abs(w * np.tan(angle_rad)))
 
             image = Image.new("RGB", (new_w, new_h), "white")
@@ -321,7 +316,8 @@ class GlyphScribe:
             image = data_transformer(image)
 
         directory = os.path.dirname(output_path)
-        os.makedirs(directory, exist_ok=True)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
 
         image.save(output_path)
         return
